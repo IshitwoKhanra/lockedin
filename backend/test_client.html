@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html>
+<head><title>Raw PCM Streaming Test</title></head>
+<body>
+  <h2>WebSocket Audio Streaming Test</h2>
+  <button id="startBtn">Start</button>
+  <button id="stopBtn" disabled>Stop</button>
+  <div id="status" style="font-weight:bold; margin:8px 0;">Idle</div>
+  <pre id="log"></pre>
+
+  <script>
+    const logEl = document.getElementById('log');
+    const statusEl = document.getElementById('status');
+    function log(msg) { logEl.textContent += msg + "\n"; }
+    function setStatus(text) { statusEl.textContent = text; }
+
+    let socket;
+    let audioContext;
+    let micStream;
+    let sourceNode;
+    let processorNode;
+
+    let sendingMicAudio = true;   // controls whether captured audio is sent
+    let assistantDone = false;
+
+    const audioContext_playback = new AudioContext();
+    const playbackQueue = [];
+    let isPlaying = false;
+
+    let currentAssistantLine = null;
+    let turnActive = false;
+
+    // Converts a Float32Array (range -1.0..1.0, what the Web Audio API
+    // gives us) into an Int16Array (range -32768..32767, what your
+    // backend's int16 PCM pipeline expects). Same numeric relationship as
+    // stt_test.py's _to_whisper_array(), just the reverse direction.
+    function floatTo16BitPCM(float32Array) {
+      const int16Array = new Int16Array(float32Array.length);
+      for (let i = 0; i < float32Array.length; i++) {
+        const s = Math.max(-1, Math.min(1, float32Array[i]));
+        int16Array[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      return int16Array;
+    }
+
+    function tryResumeMic() {
+      if (assistantDone && !isPlaying && playbackQueue.length === 0) {
+        sendingMicAudio = true;
+        turnActive = false;
+        currentAssistantLine = null;
+        setStatus("Listening...");
+        log("[mic resumed -- listening]");
+      }
+    }
+
+    function playNextInQueue() {
+      if (isPlaying || playbackQueue.length === 0) {
+        tryResumeMic();
+        return;
+      }
+      isPlaying = true;
+
+      const audioBuffer = playbackQueue.shift();
+      const source = audioContext_playback.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioContext_playback.destination);
+      source.onended = () => {
+        isPlaying = false;
+        playNextInQueue();
+      };
+      source.start();
+    }
+
+    async function handleIncomingAudio(blob) {
+      const arrayBuffer = await blob.arrayBuffer();
+      const audioBuffer = await audioContext_playback.decodeAudioData(arrayBuffer);
+      playbackQueue.push(audioBuffer);
+      playNextInQueue();
+    }
+
+    function startNewTurn() {
+      turnActive = true;
+      assistantDone = false;
+      sendingMicAudio = false;  // mute -- stop sending mic audio while assistant talks
+      setStatus("Assistant speaking...");
+      log("[mic muted -- assistant speaking]");
+      currentAssistantLine = document.createElement("div");
+      currentAssistantLine.textContent = "Assistant: ";
+      logEl.appendChild(currentAssistantLine);
+    }
+
+    document.getElementById('startBtn').onclick = async () => {
+      micStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: false,  // off -- can distort speech Whisper needs intact
+          autoGainControl: false    // off -- same reason
+        }
+      });
+
+      // Hint the AudioContext to run at 16kHz directly -- matches
+      // SAMPLE_RATE throughout the backend, no resampling needed anywhere.
+      audioContext = new AudioContext({ sampleRate: 16000 });
+      sourceNode = audioContext.createMediaStreamSource(micStream);
+
+      // ScriptProcessorNode: fires onaudioprocess repeatedly with raw
+      // samples. bufferSize=4096, 1 input channel, 1 output channel.
+      processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+
+      processorNode.onaudioprocess = (event) => {
+        if (!sendingMicAudio) return;  // muted -- drop this chunk entirely
+        if (!socket || socket.readyState !== WebSocket.OPEN) return;
+
+        const floatSamples = event.inputBuffer.getChannelData(0);
+        const int16Samples = floatTo16BitPCM(floatSamples);
+        socket.send(int16Samples.buffer);  // raw PCM bytes, no encoding
+      };
+
+      // ScriptProcessorNode only fires if connected through to a
+      // destination -- route through a silent (gain=0) node so we don't
+      // actually hear our own raw mic input played back.
+      const silentGain = audioContext.createGain();
+      silentGain.gain.value = 0;
+      sourceNode.connect(processorNode);
+      processorNode.connect(silentGain);
+      silentGain.connect(audioContext.destination);
+
+      socket = new WebSocket("ws://localhost:8000/ws/audio");
+
+      socket.onopen = () => {
+        log("WebSocket connected");
+        setStatus("Listening...");
+      };
+
+      socket.onmessage = (event) => {
+        if (typeof event.data === "string") {
+          if (event.data === "__END_TURN__") {
+            assistantDone = true;
+            tryResumeMic();
+            return;
+          }
+          if (event.data.startsWith("__USER__")) {
+            const userText = event.data.slice("__USER__".length);
+            const line = document.createElement("div");
+            line.textContent = "You: " + userText;
+            logEl.appendChild(line);
+            return;
+          }
+          if (!turnActive) startNewTurn();
+          currentAssistantLine.textContent += event.data + " ";
+        } else {
+          handleIncomingAudio(event.data);
+        }
+      };
+
+      socket.onerror = (err) => log("WebSocket error: " + JSON.stringify(err));
+      socket.onclose = () => { log("WebSocket closed"); setStatus("Disconnected"); };
+
+      document.getElementById('startBtn').disabled = true;
+      document.getElementById('stopBtn').disabled = false;
+    };
+
+    document.getElementById('stopBtn').onclick = () => {
+      if (processorNode) processorNode.disconnect();
+      if (sourceNode) sourceNode.disconnect();
+      if (micStream) micStream.getTracks().forEach(t => t.stop());
+      if (socket) socket.close();
+      setStatus("Idle");
+      document.getElementById('startBtn').disabled = false;
+      document.getElementById('stopBtn').disabled = true;
+    };
+  </script>
+</body>
+</html>

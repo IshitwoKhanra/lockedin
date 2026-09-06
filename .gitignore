@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+dist/
+dist-ssr/
+.vite/
+
+# Logs
+*.log
+
+# Editors
+.vscode/
+.idea/
+.DS_Store
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+
+# Local audio
+*.wav
+*.mp3
+*.m4a

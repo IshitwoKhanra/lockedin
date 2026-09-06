@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+python-multipart
+webrtcvad
+faster-whisper
+numpy
+openai
+python-dotenv
+piper-tts
+pypdf
+supabase
+pyjwt
+slowapi
